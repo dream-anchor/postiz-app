@@ -1,0 +1,107 @@
+---
+name: "Sync upstream & build fork image"
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # daily 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dream-anchor branch
+        uses: actions/checkout@v4
+        with:
+          ref: dream-anchor
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "dream-anchor-bot"
+          git config user.email "bot@dream-anchor.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/gitroomhq/postiz-app.git
+          git fetch upstream main
+
+      - name: Rebase onto upstream/main
+        id: rebase
+        run: |
+          if git rebase upstream/main; then
+            echo "rebase_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            git rebase --abort
+            LAST_SHA=$(git rev-parse upstream/main)
+            echo "rebase_ok=false" >> "$GITHUB_OUTPUT"
+            echo "last_upstream_sha=$LAST_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Notify Slack on conflict
+        if: steps.rebase.outputs.rebase_ok == 'false'
+        run: |
+          curl -sS -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"channel\": \"C0B6H1JHVNU\",
+              \"text\": \":red_circle: Postiz Fork: Rebase-Konflikt mit upstream.\nManueller Eingriff noetig in dream-anchor/postiz-app#dream-anchor.\nLetzter upstream-commit: ${{ steps.rebase.outputs.last_upstream_sha }}\"
+            }"
+          exit 1
+
+      - name: Force-push rebased branch
+        if: steps.rebase.outputs.rebase_ok == 'true'
+        run: git push --force-with-lease origin dream-anchor
+
+      - name: Determine version
+        if: steps.rebase.outputs.rebase_ok == 'true'
+        id: version
+        run: |
+          # Try latest upstream tag first, fall back to package.json
+          UPSTREAM_VER=$(git describe --tags --abbrev=0 upstream/main 2>/dev/null || echo "")
+          if [ -z "$UPSTREAM_VER" ]; then
+            UPSTREAM_VER=$(python3 -c "import json; print(json.load(open('package.json')).get('version','0.0.0'))")
+          fi
+          echo "version=${UPSTREAM_VER}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${UPSTREAM_VER}-dasic"
+
+      - name: Set up Docker Buildx
+        if: steps.rebase.outputs.rebase_ok == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: steps.rebase.outputs.rebase_ok == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        if: steps.rebase.outputs.rebase_ok == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          docker buildx build --platform linux/amd64 \
+            -f Dockerfile.dev \
+            -t ghcr.io/dream-anchor/postiz-app:latest \
+            -t ghcr.io/dream-anchor/postiz-app:${VERSION}-dasic \
+            --build-arg NEXT_PUBLIC_VERSION=${VERSION}-dasic \
+            --pull \
+            --no-cache \
+            --provenance=false --sbom=false \
+            --push .
+
+      - name: Notify Slack on success
+        if: steps.rebase.outputs.rebase_ok == 'true'
+        run: |
+          curl -sS -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"channel\": \"C0B6H1JHVNU\",
+              \"text\": \":white_check_mark: Postiz Fork v${{ steps.version.outputs.version }}-dasic gebaut & gepusht. VPS pullt beim naechsten docker-compose pull.\"
+            }"
