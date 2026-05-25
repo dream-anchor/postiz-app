@@ -45,12 +45,14 @@ jobs:
       - name: Notify Slack on conflict
         if: steps.rebase.outputs.rebase_ok == 'false'
         run: |
-          curl -sS -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
-            -H 'Content-Type: application/json' \
-            -d "{
-              \"channel\": \"C0B6H1JHVNU\",
-              \"text\": \":red_circle: Postiz Fork: Rebase-Konflikt mit upstream.\nManueller Eingriff noetig in dream-anchor/postiz-app#dream-anchor.\nLetzter upstream-commit: ${{ steps.rebase.outputs.last_upstream_sha }}\"
-            }"
+          if [ -n "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            curl -sS -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+              -H 'Content-Type: application/json' \
+              -d "{
+                \"channel\": \"C0B6H1JHVNU\",
+                \"text\": \":red_circle: Postiz Fork: Rebase-Konflikt mit upstream.\nManueller Eingriff noetig in dream-anchor/postiz-app#dream-anchor.\nLetzter upstream-commit: ${{ steps.rebase.outputs.last_upstream_sha }}\"
+              }"
+          fi
           exit 1
 
       - name: Force-push rebased branch
@@ -97,7 +99,7 @@ jobs:
             --push .
 
       - name: Notify Slack on success
-        if: steps.rebase.outputs.rebase_ok == 'true'
+        if: steps.rebase.outputs.rebase_ok == 'true' && secrets.SLACK_WEBHOOK_URL != ''
         run: |
           curl -sS -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
             -H 'Content-Type: application/json' \
